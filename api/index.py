@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify, make_response
 import requests
 import random
 import os
+import re
 
 app = Flask(__name__)
 
@@ -44,6 +45,10 @@ HALFBLOOD_URL = "https://halfblood.famapp.in/vpa/verifyExt"
 def _pick_credit():
     return random.choice(CREDITS)
 
+def is_phone_number(s):
+    # Simple check for phone number (digits only, 10-12 chars)
+    return s.isdigit() and 10 <= len(s) <= 12
+
 @app.route('/contact', methods=['GET'])
 def get_contact_info():
     init_session()
@@ -51,6 +56,11 @@ def get_contact_info():
     if not number:
         return jsonify({"error": "Missing 'number' parameter"}), 400
     
+    # If it's not a phone number, it might be a UPI ID. 
+    # The /user/contact/in/ endpoint only works for phone numbers.
+    if not is_phone_number(number):
+        return jsonify({"error": "The /contact endpoint only supports phone numbers. For UPI IDs, use /vpa"}), 400
+
     url = f"{OFFICIAL_API_HOST}/user/contact/in/{number}/"
     try:
         response = SESSION.get(url, timeout=10)
@@ -72,41 +82,38 @@ def number_to_vpa():
     if not number:
         return jsonify({"error": "Missing 'number' parameter (query param or JSON body)"}), 400
 
-    # The user mentioned "give famid to number", so we should check the contact info first
-    # or use the halfblood API if it provides that info.
-    # Let's try to get contact info first to see if it has the famid.
-    
-    contact_url = f"{OFFICIAL_API_HOST}/user/contact/in/{number}/"
-    try:
-        contact_resp = SESSION.get(contact_url, timeout=10)
-        contact_resp.raise_for_status()
-        contact_data = contact_resp.json()
-        
-        # If contact info is found, we can return it.
-        # If the user specifically wants VPA, we also call the halfblood API.
-        
-        payload = {"upi_number": str(number)}
-        vpa_resp = SESSION.post(HALFBLOOD_URL, json=payload, timeout=12)
-        vpa_data = vpa_resp.json() if vpa_resp.status_code == 200 else {}
-        
-        combined_data = {
-            "contact_info": contact_data,
-            "vpa_info": vpa_data,
-            "_credits": _pick_credit()
-        }
-        
-        return jsonify(combined_data)
-        
-    except requests.exceptions.RequestException as e:
-        # Fallback to just VPA if contact info fails
-        payload = {"upi_number": str(number)}
+    # If it's a phone number, try to get contact info first
+    if is_phone_number(number):
+        contact_url = f"{OFFICIAL_API_HOST}/user/contact/in/{number}/"
         try:
+            contact_resp = SESSION.get(contact_url, timeout=10)
+            contact_resp.raise_for_status()
+            contact_data = contact_resp.json()
+            
+            payload = {"upi_number": str(number)}
             vpa_resp = SESSION.post(HALFBLOOD_URL, json=payload, timeout=12)
-            vpa_data = vpa_resp.json()
-            vpa_data["_credits"] = _pick_credit()
-            return jsonify(vpa_data)
-        except Exception as ve:
-            return jsonify({"error": str(e), "vpa_error": str(ve)}), 500
+            vpa_data = vpa_resp.json() if vpa_resp.status_code == 200 else {}
+            
+            combined_data = {
+                "contact_info": contact_data,
+                "vpa_info": vpa_data,
+                "_credits": _pick_credit()
+            }
+            return jsonify(combined_data)
+        except Exception as e:
+            # Fallback to just VPA
+            pass
+
+    # For UPI IDs or if contact lookup failed
+    payload = {"upi_number": str(number)}
+    try:
+        vpa_resp = SESSION.post(HALFBLOOD_URL, json=payload, timeout=12)
+        vpa_resp.raise_for_status()
+        vpa_data = vpa_resp.json()
+        vpa_data["_credits"] = _pick_credit()
+        return jsonify(vpa_data)
+    except requests.exceptions.RequestException as e:
+        return jsonify({"error": str(e), "message": "Failed to retrieve VPA info"}), 500
 
 @app.route('/')
 def index():
