@@ -72,28 +72,41 @@ def number_to_vpa():
     if not number:
         return jsonify({"error": "Missing 'number' parameter (query param or JSON body)"}), 400
 
-    payload = {"upi_number": str(number)}
-
+    # The user mentioned "give famid to number", so we should check the contact info first
+    # or use the halfblood API if it provides that info.
+    # Let's try to get contact info first to see if it has the famid.
+    
+    contact_url = f"{OFFICIAL_API_HOST}/user/contact/in/{number}/"
     try:
-        resp = SESSION.post(HALFBLOOD_URL, json=payload, timeout=12)
-    except requests.RequestException as e:
-        return jsonify({"error": "Request to upstream failed", "details": str(e)}), 502
-
-    try:
-        upstream_json = resp.json()
-    except ValueError:
-        upstream_json = {"raw": resp.text}
-
-    selected_credit = _pick_credit()
-
-    if isinstance(upstream_json, dict):
-        upstream_json["_credits"] = selected_credit
-    else:
-        upstream_json = {"result": upstream_json, "_credits": selected_credit}
-
-    response = make_response(jsonify(upstream_json), resp.status_code if resp.status_code < 500 else 200)
-    response.headers["X-Credits"] = selected_credit
-    return response
+        contact_resp = SESSION.get(contact_url, timeout=10)
+        contact_resp.raise_for_status()
+        contact_data = contact_resp.json()
+        
+        # If contact info is found, we can return it.
+        # If the user specifically wants VPA, we also call the halfblood API.
+        
+        payload = {"upi_number": str(number)}
+        vpa_resp = SESSION.post(HALFBLOOD_URL, json=payload, timeout=12)
+        vpa_data = vpa_resp.json() if vpa_resp.status_code == 200 else {}
+        
+        combined_data = {
+            "contact_info": contact_data,
+            "vpa_info": vpa_data,
+            "_credits": _pick_credit()
+        }
+        
+        return jsonify(combined_data)
+        
+    except requests.exceptions.RequestException as e:
+        # Fallback to just VPA if contact info fails
+        payload = {"upi_number": str(number)}
+        try:
+            vpa_resp = SESSION.post(HALFBLOOD_URL, json=payload, timeout=12)
+            vpa_data = vpa_resp.json()
+            vpa_data["_credits"] = _pick_credit()
+            return jsonify(vpa_data)
+        except Exception as ve:
+            return jsonify({"error": str(e), "vpa_error": str(ve)}), 500
 
 @app.route('/')
 def index():
